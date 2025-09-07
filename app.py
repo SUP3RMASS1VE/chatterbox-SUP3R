@@ -1,7 +1,15 @@
 import random
 import numpy as np
 import torch
-from chatterbox.src.chatterbox.tts import ChatterboxTTS
+
+# Try to import multilingual TTS only
+try:
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+    MULTILINGUAL_AVAILABLE = True
+    print("🌍 Multilingual TTS support detected")
+except ImportError:
+    MULTILINGUAL_AVAILABLE = False
+    print("❌ Multilingual TTS not available. Please install latest chatterbox package.")
 import gradio as gr
 import os
 import subprocess
@@ -22,6 +30,10 @@ from scipy.fft import fft, ifft, fftfreq
 import librosa
 import soundfile as sf
 import base64
+import requests
+from pathlib import Path
+from urllib.parse import urlparse
+import threading
 
 # Suppress the specific LoRACompatibleLinear deprecation warning
 warnings.filterwarnings("ignore", message=".*LoRACompatibleLinear.*deprecated.*", category=FutureWarning)
@@ -68,7 +80,231 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"🚀 Running on device: {DEVICE}")
 
 # --- Global Model Initialization ---
-MODEL = None
+MULTILINGUAL_MODEL = None
+
+# Supported languages for multilingual model
+SUPPORTED_LANGUAGES = {
+    'ar': 'Arabic',
+    'da': 'Danish', 
+    'de': 'German',
+    'el': 'Greek',
+    'en': 'English',
+    'es': 'Spanish',
+    'fi': 'Finnish',
+    'fr': 'French',
+    'he': 'Hebrew',
+    'hi': 'Hindi',
+    'it': 'Italian',
+    'ja': 'Japanese',
+    'ko': 'Korean',
+    'ms': 'Malay',
+    'nl': 'Dutch',
+    'no': 'Norwegian',
+    'pl': 'Polish',
+    'pt': 'Portuguese',
+    'ru': 'Russian',
+    'sv': 'Swedish',
+    'sw': 'Swahili',
+    'tr': 'Turkish',
+    'zh': 'Chinese'
+}
+
+# Multilingual model download configuration
+MULTILINGUAL_MODEL_FILES = {
+    'Cangjie5_TC': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/Cangjie5_TC.json',
+    'conds': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/conds.pt',
+    'mtl_tokenizer': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/mtl_tokenizer.json',
+    's3gen': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.pt',
+    't3_23lang': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/t3_23lang.safetensors',
+    've': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/ve.pt'
+}
+
+# Model download directory
+MODEL_DOWNLOAD_DIR = "models/multilingual"
+download_status = {"status": "ready", "progress": 0, "current_file": "", "total_files": 0}
+
+def ensure_model_download_dir():
+    """Ensure the model download directory exists."""
+    if not os.path.exists(MODEL_DOWNLOAD_DIR):
+        os.makedirs(MODEL_DOWNLOAD_DIR, exist_ok=True)
+        print(f"📁 Created model download directory: {os.path.abspath(MODEL_DOWNLOAD_DIR)}")
+
+def check_multilingual_models_exist():
+    """Check if multilingual model files already exist."""
+    ensure_model_download_dir()
+    missing_files = []
+    existing_files = []
+    
+    for model_name, url in MULTILINGUAL_MODEL_FILES.items():
+        # Extract the correct filename with extension from the URL
+        filename_with_ext = url.split('/')[-1]
+        model_path = os.path.join(MODEL_DOWNLOAD_DIR, filename_with_ext)
+        if os.path.exists(model_path):
+            existing_files.append(model_name)
+        else:
+            missing_files.append(model_name)
+    
+    return existing_files, missing_files
+
+def download_file_with_progress(url, filepath, filename):
+    """Download a file with progress tracking."""
+    try:
+        print(f"📥 Downloading {filename}...")
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded_size = 0
+        
+        with open(filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded_size += len(chunk)
+                    
+                    # Update progress
+                    if total_size > 0:
+                        progress = (downloaded_size / total_size) * 100
+                        download_status["progress"] = progress
+        
+        print(f"✅ Downloaded {filename} successfully")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error downloading {filename}: {e}")
+        return False
+
+def download_multilingual_models():
+    """Download all multilingual model files."""
+    global download_status
+    
+    try:
+        ensure_model_download_dir()
+        
+        # Check what needs to be downloaded
+        existing_files, missing_files = check_multilingual_models_exist()
+        
+        if not missing_files:
+            download_status["status"] = "complete"
+            download_status["progress"] = 100
+            return "✅ All multilingual model files already exist!"
+        
+        download_status["status"] = "downloading"
+        download_status["total_files"] = len(missing_files)
+        
+        print(f"🌍 Starting download of {len(missing_files)} multilingual model files...")
+        
+        for i, model_name in enumerate(missing_files):
+            download_status["current_file"] = model_name
+            download_status["progress"] = (i / len(missing_files)) * 100
+            
+            url = MULTILINGUAL_MODEL_FILES[model_name]
+            # Extract the correct filename with extension from the URL
+            filename_with_ext = url.split('/')[-1]
+            filepath = os.path.join(MODEL_DOWNLOAD_DIR, filename_with_ext)
+            
+            success = download_file_with_progress(url, filepath, filename_with_ext)
+            
+            if not success:
+                download_status["status"] = "error"
+                return f"❌ Failed to download {model_name}"
+        
+        download_status["status"] = "complete"
+        download_status["progress"] = 100
+        download_status["current_file"] = ""
+        
+        print("🎉 All multilingual model files downloaded successfully!")
+        return "🎉 Multilingual models downloaded successfully! You can now enable multilingual mode."
+        
+    except Exception as e:
+        download_status["status"] = "error"
+        error_msg = f"❌ Download error: {str(e)}"
+        print(error_msg)
+        return error_msg
+
+def download_models_async():
+    """Download models in a separate thread to avoid blocking the UI."""
+    threading.Thread(target=download_multilingual_models, daemon=True).start()
+
+def get_download_status():
+    """Get current download status for UI updates."""
+    status = download_status["status"]
+    progress = download_status.get("progress", 0)
+    current_file = download_status.get("current_file", "")
+    total_files = download_status.get("total_files", 0)
+    
+    if status == "ready":
+        return "📋 Ready to download multilingual models"
+    elif status == "downloading":
+        file_info = f" ({current_file})" if current_file else ""
+        return f"📥 Downloading... {progress:.1f}%{file_info}"
+    elif status == "complete":
+        return "✅ Download complete! Multilingual models ready."
+    elif status == "error":
+        return "❌ Download failed. Check console for details."
+    else:
+        return f"Status: {status}"
+
+def check_model_files_status():
+    """Check and return the status of model files."""
+    existing_files, missing_files = check_multilingual_models_exist()
+    
+    if not missing_files:
+        status_text = f"✅ All multilingual model files present ({len(existing_files)} files)\n"
+        status_text += f"📁 Location: {os.path.abspath(MODEL_DOWNLOAD_DIR)}\n"
+        status_text += f"Files: {', '.join(existing_files)}"
+        return status_text
+    else:
+        status_text = f"⚠️ Missing {len(missing_files)} model files\n"
+        if existing_files:
+            status_text += f"✅ Found: {', '.join(existing_files)}\n"
+        status_text += f"❌ Missing: {', '.join(missing_files)}\n"
+        status_text += "Click 'Download Models' to get the missing files."
+        return status_text
+
+def load_model_manually():
+    """Manually load the multilingual model into memory."""
+    global MULTILINGUAL_MODEL
+    
+    try:
+        if MULTILINGUAL_MODEL is not None:
+            return "✅ Model already loaded in memory!", True
+        
+        print("🚀 Manually loading multilingual model...")
+        MULTILINGUAL_MODEL = get_or_load_model()
+        
+        if MULTILINGUAL_MODEL is not None:
+            return "✅ Model loaded successfully! Ready for speech generation.", True
+        else:
+            return "❌ Failed to load model. Please check your model files.", False
+            
+    except Exception as e:
+        error_msg = f"❌ Error loading model: {str(e)}"
+        print(error_msg)
+        return error_msg, False
+
+def check_model_loaded_status():
+    """Check if the model is loaded and return status."""
+    global MULTILINGUAL_MODEL
+    
+    if MULTILINGUAL_MODEL is not None:
+        return "✅ Model loaded in memory - Ready for generation!"
+    else:
+        existing_files, missing_files = check_multilingual_models_exist()
+        if not missing_files:
+            return "📁 Models downloaded but not loaded - Click 'Load Model' to use them"
+        else:
+            return "📥 Models not downloaded - Use download section to get them"
+
+def should_show_load_button():
+    """Check if the load model button should be visible."""
+    global MULTILINGUAL_MODEL
+    
+    if MULTILINGUAL_MODEL is not None:
+        return False  # Hide button if model is already loaded
+    
+    existing_files, missing_files = check_multilingual_models_exist()
+    return len(missing_files) == 0  # Show button if all models are downloaded
 
 # --- Voice Presets System ---
 PRESETS_FILE = "voice_presets.json"
@@ -755,16 +991,32 @@ def clear_hf_credentials():
         return False
 
 def get_or_load_model():
-    """Loads the ChatterboxTTS model if it hasn't been loaded already,
+    """Loads the multilingual ChatterBox model if it hasn't been loaded already,
     and ensures it's on the correct device."""
-    global MODEL
-    if MODEL is None:
-        print("Model not loaded, initializing...")
+    global MULTILINGUAL_MODEL
+    
+    # Check if multilingual TTS is available
+    if not MULTILINGUAL_AVAILABLE:
+        raise RuntimeError("❌ Multilingual TTS not available. Please install latest chatterbox package.")
+    
+    # Load multilingual model
+    if MULTILINGUAL_MODEL is None:
+        print("🌍 Multilingual model not loaded, initializing...")
         try:
-            MODEL = ChatterboxTTS.from_pretrained(DEVICE)
-            if hasattr(MODEL, 'to') and str(MODEL.device) != DEVICE:
-                MODEL.to(DEVICE)
-            print(f"Model loaded successfully. Internal device: {getattr(MODEL, 'device', 'N/A')}")
+            # Check if we have local downloaded models
+            existing_files, missing_files = check_multilingual_models_exist()
+            if not missing_files:
+                print(f"📁 Using local multilingual models from: {os.path.abspath(MODEL_DOWNLOAD_DIR)}")
+                # Load from local directory if all files exist
+                MULTILINGUAL_MODEL = ChatterboxMultilingualTTS.from_local(MODEL_DOWNLOAD_DIR, device=DEVICE)
+            else:
+                print("🌐 Loading multilingual model from Hugging Face...")
+                print("💡 Tip: Download models locally using the download section for faster loading")
+                MULTILINGUAL_MODEL = ChatterboxMultilingualTTS.from_pretrained(device=DEVICE)
+            
+            if hasattr(MULTILINGUAL_MODEL, 'to') and str(MULTILINGUAL_MODEL.device) != DEVICE:
+                MULTILINGUAL_MODEL.to(DEVICE)
+            print(f"🌍 Multilingual model loaded successfully. Internal device: {getattr(MULTILINGUAL_MODEL, 'device', 'N/A')}")
         except Exception as e:
             error_str = str(e)
             # Check if it's a 401 authentication error
@@ -773,23 +1025,30 @@ def get_or_load_model():
                 clear_hf_credentials()
                 try:
                     # Retry loading the model
-                    MODEL = ChatterboxTTS.from_pretrained(DEVICE)
-                    if hasattr(MODEL, 'to') and str(MODEL.device) != DEVICE:
-                        MODEL.to(DEVICE)
-                    print(f"Model loaded successfully after clearing credentials. Internal device: {getattr(MODEL, 'device', 'N/A')}")
+                    existing_files, missing_files = check_multilingual_models_exist()
+                    if not missing_files:
+                        print(f"📁 Retrying with local multilingual models from: {os.path.abspath(MODEL_DOWNLOAD_DIR)}")
+                        MULTILINGUAL_MODEL = ChatterboxMultilingualTTS.from_local(MODEL_DOWNLOAD_DIR, device=DEVICE)
+                    else:
+                        print("🌐 Retrying multilingual model from Hugging Face...")
+                        print("💡 Tip: Download models locally using the download section for faster loading")
+                        MULTILINGUAL_MODEL = ChatterboxMultilingualTTS.from_pretrained(device=DEVICE)
+                    
+                    if hasattr(MULTILINGUAL_MODEL, 'to') and str(MULTILINGUAL_MODEL.device) != DEVICE:
+                        MULTILINGUAL_MODEL.to(DEVICE)
+                    print(f"🌍 Multilingual model loaded successfully after clearing credentials. Internal device: {getattr(MULTILINGUAL_MODEL, 'device', 'N/A')}")
                 except Exception as retry_error:
-                    print(f"Error loading model after retry: {retry_error}")
+                    print(f"❌ Error loading multilingual model after retry: {retry_error}")
                     raise
             else:
-                print(f"Error loading model: {e}")
+                print(f"❌ Error loading multilingual model: {e}")
                 raise
-    return MODEL
+    
+    return MULTILINGUAL_MODEL
 
-# Attempt to load the model at startup.
-try:
-    get_or_load_model()
-except Exception as e:
-    print(f"CRITICAL: Failed to load model on startup. Application may not function. Error: {e}")
+# Skip model loading at startup - models will be loaded on-demand
+print("🚀 App ready - multilingual models will be loaded when needed")
+print("💡 Use the download section to get multilingual models for 23-language support")
 
 def set_seed(seed: int):
     """Sets the random seed for reproducibility across torch, numpy, and random."""
@@ -860,6 +1119,8 @@ def generate_tts_audio(
     seed_num_input: int,
     cfgw_input: float,
     chunk_size_input: int,
+    # Language selection
+    language_id_input: str = "en",
     # Basic audio effects parameters
     enable_reverb: bool = False,
     reverb_room: float = 0.3,
@@ -899,13 +1160,18 @@ def generate_tts_audio(
     speaker_settings_json: str = "{}",
 ) -> tuple[tuple[int, np.ndarray], tuple[int, np.ndarray], str]:
     """
-    Generates TTS audio using the ChatterboxTTS model, handling both single voice and conversation modes.
+    Generates TTS audio using the multilingual ChatterBox model.
     Returns: (audio_output, waveform_data, waveform_info)
     """
+    # Load the multilingual model
     current_model = get_or_load_model()
 
     if current_model is None:
-        raise RuntimeError("TTS model is not loaded.")
+        raise RuntimeError("Multilingual TTS model is not loaded.")
+    
+    # Show which language is being used
+    language_name = SUPPORTED_LANGUAGES.get(language_id_input, f"Unknown ({language_id_input})")
+    print(f"🌍 Using multilingual model for {language_name} generation")
 
     if seed_num_input != 0:
         set_seed(int(seed_num_input))
@@ -961,7 +1227,10 @@ def generate_tts_audio(
             speaker_settings,
             conversation_pause_duration=conversation_pause,
             speaker_transition_pause=speaker_transition_pause,
-            effects_settings=effects_settings if any(effects_settings[key] for key in ['enable_reverb', 'enable_echo', 'enable_pitch', 'enable_noise_reduction', 'enable_equalizer', 'enable_spatial', 'enable_background']) else None
+            effects_settings=effects_settings if any(effects_settings[key] for key in ['enable_reverb', 'enable_echo', 'enable_pitch', 'enable_noise_reduction', 'enable_equalizer', 'enable_spatial', 'enable_background']) else None,
+            use_multilingual=True,
+            language_id=language_id_input,
+            current_model=current_model
         )
         
         if audio_result is None:
@@ -994,9 +1263,11 @@ def generate_tts_audio(
                 if len(text_chunks) > 1:
                     print(f"Processing chunk {i+1}/{len(text_chunks)}: '{chunk[:30]}...'")
                 
+                # Generate audio with multilingual parameters
                 wav = current_model.generate(
                     chunk,
                     audio_prompt_path=audio_prompt_path_input,
+                    language_id=language_id_input,
                     exaggeration=exaggeration_input,
                     temperature=temperature_input,
                     cfg_weight=cfgw_input,
@@ -1249,7 +1520,10 @@ def generate_conversation_audio(
     speaker_settings,
     conversation_pause_duration=0.8,
     speaker_transition_pause=0.3,
-    effects_settings=None
+    effects_settings=None,
+    use_multilingual=False,
+    language_id="en",
+    current_model=None
 ):
     """Generate a complete conversation with multiple voices."""
     try:
@@ -1265,8 +1539,7 @@ def generate_conversation_audio(
         
         print(f"📝 Parsed {len(conversation)} conversation lines")
         
-        # Get the model
-        current_model = get_or_load_model()
+        # Use the passed model
         if current_model is None:
             return None, "❌ TTS model not available"
         
@@ -1292,9 +1565,11 @@ def generate_conversation_audio(
                 
                 # Generate audio for this line
                 try:
+                    # Generate with multilingual parameters
                     wav = current_model.generate(
                         text,
                         audio_prompt_path=settings.get('ref_audio', ''),
+                        language_id=language_id,
                         exaggeration=settings.get('exaggeration', 0.5),
                         temperature=settings.get('temperature', 0.8),
                         cfg_weight=settings.get('cfg_weight', 0.5),
@@ -1498,20 +1773,101 @@ def update_speaker_audio_settings(speakers_list, audio1, audio2, audio3, audio4,
         print(f"Error updating speaker audio settings: {e}")
         return current_settings_json
 
-with gr.Blocks(title="🎭 Chatterbox TTS Pro") as demo:
+with gr.Blocks(title="🌍 Chatterbox TTS Pro - Multilingual") as demo:
     # Header
+    if MULTILINGUAL_AVAILABLE:
+        multilingual_status = "🌍 Multilingual Ready"
+        status_message = "**Supports 23 languages**: Arabic, Chinese, French, German, Spanish, and many more! Download models below to get started."
+    else:
+        multilingual_status = "⚠️ No Models Available"
+        status_message = "**Please install chatterbox-tts**: `pip install chatterbox-tts` or download models below."
+    
     gr.Markdown(
-        """
-        # 🎭 Chatterbox TTS Pro
-        **Advanced Text-to-Speech with Voice Presets, Audio Effects & Export Options**
+        f"""
+        # 🎭 Chatterbox TTS Pro {multilingual_status}
+        **Advanced Multilingual Text-to-Speech with Voice Presets, Audio Effects & Export Options**
         
         Generate high-quality speech from text with reference audio styling, save your favorite voice presets, apply professional audio effects, and export in multiple formats!
+        {status_message}
+        
+        **🚀 Getting Started**: Models are loaded on-demand. Use the download section below to get multilingual models for 23-language support.
         """
     )
     
     # Initialize presets on app startup
     initial_presets = get_preset_names()
     print(f"🚀 App starting with {len(initial_presets)} presets available")
+    
+    # Model Download Section - closed by default to reduce UI clutter
+    with gr.Accordion("📥 Download Multilingual Models", open=False):
+        gr.Markdown("""
+        ### 🌍 Multilingual Model Download Manager
+        **Manual Download Required**: Download the required model files for 23-language support. These models enable text-to-speech in Arabic, Chinese, French, German, Spanish, and many more languages.
+        
+        **No Auto-Download**: Models are only downloaded when you click the download button below.
+        """)
+        
+        with gr.Row():
+            with gr.Column(scale=2):
+                model_status_display = gr.Textbox(
+                    label="📋 Model Files Status",
+                    value=check_model_files_status(),
+                    interactive=False,
+                    lines=4
+                )
+                
+                download_progress_display = gr.Textbox(
+                    label="📊 Download Progress",
+                    value=get_download_status(),
+                    interactive=False,
+                    lines=2
+                )
+
+                model_loading_status = gr.Textbox(
+                    label="🚀 Model Loading Status",
+                    value=check_model_loaded_status(),
+                    interactive=False,
+                    lines=2
+                )
+            
+                with gr.Column(scale=1):
+                    with gr.Group():
+                        check_models_btn = gr.Button(
+                            "🔍 Check Model Files",
+                            variant="secondary",
+                            size="sm"
+                        )
+
+                        download_models_btn = gr.Button(
+                            "📥 Download Multilingual Models",
+                            variant="primary",
+                            size="lg"
+                        )
+
+                        load_model_btn = gr.Button(
+                            "🚀 Load Model into Memory",
+                            variant="secondary",
+                            size="lg",
+                            visible=False
+                        )
+
+                        refresh_status_btn = gr.Button(
+                            "🔄 Refresh Status",
+                            variant="secondary",
+                            size="sm"
+                        )
+                
+                gr.Markdown("""
+                **Model Files:**
+                - `Cangjie5_TC` - Chinese tokenizer
+                - `conds` - Conditional embeddings
+                - `mtl_tokenizer` - Multilingual tokenizer
+                - `s3gen` - Speech generator
+                - `t3_23lang` - Text-to-speech model
+                - `ve` - Voice encoder
+                
+                **Total size:** ~2-4 GB
+                """)
     
     with gr.Row():
         with gr.Column(scale=2):
@@ -1522,6 +1878,25 @@ with gr.Blocks(title="🎭 Chatterbox TTS Pro") as demo:
                 max_lines=10,
                 placeholder="Enter your text here..."
             )
+            
+            # Language selection
+            with gr.Group():
+                gr.Markdown("### 🌍 Language Selection")
+                with gr.Row():
+                    language_dropdown = gr.Dropdown(
+                        choices=[(f"{lang_name} ({code})", code) for code, lang_name in SUPPORTED_LANGUAGES.items()],
+                        value="en",
+                        label="🗣️ Target Language",
+                        info="Select the language for text-to-speech generation"
+                    )
+                
+                # Show language availability info
+                if MULTILINGUAL_AVAILABLE:
+                    gr.Markdown("*✅ Multilingual support available - Download models above to use 23 languages*")
+                else:
+                    gr.Markdown("*❌ No TTS models available - Please install chatterbox-tts or download models*")
+                
+                gr.Markdown("*💡 Models are loaded on-demand when you generate speech*")
             
             # Reference audio
             ref_wav = gr.Audio(
@@ -1975,8 +2350,12 @@ Alice: I went to Japan. It was absolutely incredible!""",
             gr.Markdown(
                 """
                 ### 💡 Pro Tips
+                - **On-demand loading**: Models load only when you generate speech (no startup downloads)
                 - **Long text**: Automatically chunked for best quality
                 - **Voice presets**: Save your favorite combinations
+                - **Model download**: Use the download section at the top to get multilingual models (~2-4GB)
+                - **Multilingual mode**: Enable for 23 language support (Arabic, Chinese, French, Spanish, etc.)
+                - **Language matching**: Match reference audio language to target language for best results
                 - **Conversation mode**: Generate multi-speaker dialogues with different voices
                 - **Basic effects**: Add reverb for space, echo for depth, pitch shift for character
                 - **Noise reduction**: Automatically cleans up noisy reference audio
@@ -1995,6 +2374,13 @@ Alice: I went to Japan. It was absolutely incredible!""",
                 - Use EQ to enhance specific voice characteristics
                 - Position voices spatially for immersive experiences
                 - Analyze waveform to understand audio quality
+                
+                ### 🌍 Multilingual Best Practices
+                - **Language matching**: Reference audio should match target language
+                - **CFG weight**: Lower (0.3) if reference has different language accent
+                - **Supported languages**: 23 languages from Arabic to Chinese
+                - **Quality**: Multilingual model maintains high quality across all languages
+                - **Mixed conversations**: Use different languages per speaker in conversation mode
                 
                 ### 🎭 Voice Conversation Mode Guide
                 - **Script Format**: Use `SpeakerName: Dialogue text` format
@@ -2037,11 +2423,75 @@ Alice: I went to Japan. It was absolutely incredible!""",
     # Hidden components for waveform analysis
     waveform_data = gr.State(None)
 
+    # Language dropdown is always visible now
+    
+    # Model download event handlers
+    check_models_btn.click(
+        fn=check_model_files_status,
+        outputs=[model_status_display]
+    )
+    
+    def start_download():
+        """Start the download and return initial status."""
+        download_models_async()
+        return "📥 Starting download..."
+    
+    def download_complete_handler():
+        """Handle download completion and update UI."""
+        return (
+            get_download_status(),
+            check_model_loaded_status(),
+            gr.update(visible=should_show_load_button())
+        )
+    
+    download_models_btn.click(
+        fn=start_download,
+        outputs=[download_progress_display]
+    )
+    
+    def load_model_and_update_status():
+        """Load model and return status updates."""
+        status_msg, success = load_model_manually()
+        return status_msg, gr.update(visible=not success)
+    
+    load_model_btn.click(
+        fn=load_model_and_update_status,
+        outputs=[model_loading_status, load_model_btn]
+    )
+    
+    def refresh_all_status():
+        """Refresh all status displays and button visibility."""
+        return (
+            check_model_files_status(),
+            get_download_status(),
+            check_model_loaded_status(),
+            gr.update(visible=should_show_load_button())
+        )
+    
+    refresh_status_btn.click(
+        fn=refresh_all_status,
+        outputs=[model_status_display, download_progress_display, model_loading_status, load_model_btn]
+    )
+    
+    # Auto-refresh download progress every 2 seconds when downloading
+    def auto_refresh_download_status():
+        status = download_status["status"]
+        if status == "downloading":
+            return get_download_status()
+        return gr.update()
+    
+    # Initialize status displays on app load
+    demo.load(
+        fn=lambda: (check_model_files_status(), get_download_status(), check_model_loaded_status(), gr.update(visible=should_show_load_button())),
+        outputs=[model_status_display, download_progress_display, model_loading_status, load_model_btn]
+    )
+
     # Event handlers
     run_btn.click(
         fn=generate_tts_audio,
         inputs=[
             text, ref_wav, exaggeration, temp, seed_num, cfg_weight, chunk_size,
+            language_dropdown,
             enable_reverb, reverb_room, reverb_damping, reverb_wet,
             enable_echo, echo_delay, echo_decay,
             enable_pitch, pitch_semitones,
@@ -2123,6 +2573,7 @@ Alice: I went to Japan. It was absolutely incredible!""",
         fn=generate_tts_audio,
         inputs=[
             text, ref_wav, exaggeration, temp, seed_num, cfg_weight, chunk_size,
+            language_dropdown,
             enable_reverb, reverb_room, reverb_damping, reverb_wet,
             enable_echo, echo_delay, echo_decay,
             enable_pitch, pitch_semitones,
