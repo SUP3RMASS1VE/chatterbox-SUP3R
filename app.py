@@ -76,6 +76,12 @@ warnings.filterwarnings("ignore", message=".*forcing weights_only=False.*")
 warnings.filterwarnings("ignore", category=UserWarning, module=".*checkpoint_manager.*")
 warnings.filterwarnings("ignore", category=UserWarning, module=".*perth.*")
 
+# Suppress chatterbox TTS model warnings
+warnings.filterwarnings("ignore", message=".*Detected.*repetition of token.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*forcing EOS token.*", category=UserWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module=".*chatterbox.*")
+warnings.filterwarnings("ignore", category=UserWarning, module=".*alignment_stream_analyzer.*")
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"🚀 Running on device: {DEVICE}")
 
@@ -404,6 +410,7 @@ def save_voice_preset(name, settings):
         'temperature': settings['temperature'],
         'cfg_weight': settings['cfg_weight'],
         'chunk_size': settings['chunk_size'],
+        'language': settings.get('language', 'en'),  # Save language setting
         'ref_audio_path': saved_audio_path or '',  # Path to saved audio file
         'original_ref_audio': ref_audio_path or '',  # Original path for reference
         'created': datetime.now().isoformat()
@@ -1565,11 +1572,12 @@ def generate_conversation_audio(
                 
                 # Generate audio for this line
                 try:
-                    # Generate with multilingual parameters
+                    # Generate with multilingual parameters using speaker's language
+                    speaker_language = settings.get('language', language_id)  # Use speaker's language or fallback to global
                     wav = current_model.generate(
                         text,
                         audio_prompt_path=settings.get('ref_audio', ''),
-                        language_id=language_id,
+                        language_id=speaker_language,
                         exaggeration=settings.get('exaggeration', 0.5),
                         temperature=settings.get('temperature', 0.8),
                         cfg_weight=settings.get('cfg_weight', 0.5),
@@ -1586,7 +1594,8 @@ def generate_conversation_audio(
                         'speaker': speaker,
                         'text': text[:50] + ('...' if len(text) > 50 else ''),
                         'duration': len(line_audio) / current_model.sr,
-                        'samples': len(line_audio)
+                        'samples': len(line_audio),
+                        'language': speaker_language
                     })
                     
                 except Exception as gen_error:
@@ -1630,11 +1639,15 @@ def generate_conversation_audio(
         total_duration = len(final_conversation_audio) / current_model.sr
         unique_speakers = len(set([info['speaker'] for info in conversation_info]))
         
+        # Collect language information
+        languages_used = list(set([info['language'] for info in conversation_info]))
+        
         summary = {
             'total_lines': len(conversation),
             'unique_speakers': unique_speakers,
             'total_duration': total_duration,
             'speakers': list(set([info['speaker'] for info in conversation_info])),
+            'languages_used': languages_used,
             'conversation_info': conversation_info
         }
         
@@ -1651,10 +1664,15 @@ def format_conversation_info(summary):
         return summary
     
     try:
+        # Format languages used
+        languages_used = summary.get('languages_used', [])
+        language_names = [SUPPORTED_LANGUAGES.get(lang, lang) for lang in languages_used]
+        
         info_text = f"""
 🎭 Conversation Summary:
 • Total Lines: {summary['total_lines']} | Speakers: {summary['unique_speakers']} | Duration: {summary['total_duration']:.1f}s
 • Speakers: {', '.join(summary['speakers'])}
+• Languages: {', '.join(language_names)} ({len(languages_used)} language{'s' if len(languages_used) != 1 else ''})
 
 📝 Line Breakdown:"""
         
@@ -1662,7 +1680,9 @@ def format_conversation_info(summary):
             speaker = line_info['speaker']
             text_preview = line_info['text']
             duration = line_info['duration']
-            info_text += f"\n{i:2d}. {speaker}: \"{text_preview}\" ({duration:.1f}s)"
+            language = line_info.get('language', 'en')
+            language_name = SUPPORTED_LANGUAGES.get(language, language)
+            info_text += f"\n{i:2d}. {speaker} ({language_name}): \"{text_preview}\" ({duration:.1f}s)"
         
         return info_text.strip()
         
@@ -1706,6 +1726,7 @@ def setup_speaker_audio_components(script_text):
     # Maximum 5 speakers supported in UI
     audio_components_visibility = [False] * 5
     audio_labels = ["🎤 Speaker Voice"] * 5
+    lang_labels = ["🌍 Speaker Language"] * 5
     speaker_controls_visible = False
     
     if speakers:
@@ -1713,6 +1734,7 @@ def setup_speaker_audio_components(script_text):
         for i, speaker in enumerate(speakers[:5]):  # Limit to 5 speakers
             audio_components_visibility[i] = True
             audio_labels[i] = f"🎤 {speaker}'s Voice"
+            lang_labels[i] = f"🌍 {speaker}'s Language"
     
     # Create updates for all audio components
     updates = []
@@ -1721,6 +1743,14 @@ def setup_speaker_audio_components(script_text):
             visible=audio_components_visibility[i],
             label=audio_labels[i],
             value=None  # Clear previous uploads
+        ))
+    
+    # Create updates for all language dropdowns
+    for i in range(5):
+        updates.append(gr.update(
+            visible=audio_components_visibility[i],
+            label=lang_labels[i],
+            value="en"  # Default to English
         ))
     
     # Add visibility update for the speaker controls row
@@ -1740,14 +1770,16 @@ def setup_speaker_audio_components(script_text):
                 'ref_audio': preset.get('ref_audio_path', ''),
                 'exaggeration': preset.get('exaggeration', 0.5),
                 'temperature': preset.get('temperature', 0.8),
-                'cfg_weight': preset.get('cfg_weight', 0.5)
+                'cfg_weight': preset.get('cfg_weight', 0.5),
+                'language': preset.get('language', 'en')
             }
         else:
             speaker_settings[speaker] = {
                 'ref_audio': '',
                 'exaggeration': 0.5,
                 'temperature': 0.8,
-                'cfg_weight': 0.5
+                'cfg_weight': 0.5,
+                'language': 'en'
             }
     
     updates.append(json.dumps(speaker_settings))
@@ -1771,6 +1803,25 @@ def update_speaker_audio_settings(speakers_list, audio1, audio2, audio3, audio4,
         
     except Exception as e:
         print(f"Error updating speaker audio settings: {e}")
+        return current_settings_json
+
+def update_speaker_language_settings(speakers_list, lang1, lang2, lang3, lang4, lang5, current_settings_json):
+    """Update speaker settings JSON with language selections."""
+    try:
+        current_settings = json.loads(current_settings_json) if current_settings_json else {}
+        languages = [lang1, lang2, lang3, lang4, lang5]
+        
+        # Update settings with selected languages
+        for i, speaker in enumerate(speakers_list[:5]):
+            if speaker in current_settings:
+                if i < len(languages) and languages[i]:
+                    current_settings[speaker]['language'] = languages[i]
+                    print(f"🌍 Updated language for {speaker}: {languages[i]}")
+        
+        return json.dumps(current_settings)
+        
+    except Exception as e:
+        print(f"Error updating speaker language settings: {e}")
         return current_settings_json
 
 with gr.Blocks(title="🌍 Chatterbox TTS Pro - Multilingual") as demo:
@@ -2019,6 +2070,39 @@ Alice: I went to Japan. It was absolutely incredible!""",
                                 sources=["upload", "microphone"],
                                 type="filepath",
                                 label="🎤 Speaker 5 Voice",
+                                visible=False
+                            )
+                        
+                        with gr.Column():
+                            # Language selection for each speaker
+                            speaker_lang_1 = gr.Dropdown(
+                                choices=[(f"{lang_name} ({code})", code) for code, lang_name in SUPPORTED_LANGUAGES.items()],
+                                value="en",
+                                label="🌍 Speaker 1 Language",
+                                visible=False
+                            )
+                            speaker_lang_2 = gr.Dropdown(
+                                choices=[(f"{lang_name} ({code})", code) for code, lang_name in SUPPORTED_LANGUAGES.items()],
+                                value="en",
+                                label="🌍 Speaker 2 Language",
+                                visible=False
+                            )
+                            speaker_lang_3 = gr.Dropdown(
+                                choices=[(f"{lang_name} ({code})", code) for code, lang_name in SUPPORTED_LANGUAGES.items()],
+                                value="en",
+                                label="🌍 Speaker 3 Language",
+                                visible=False
+                            )
+                            speaker_lang_4 = gr.Dropdown(
+                                choices=[(f"{lang_name} ({code})", code) for code, lang_name in SUPPORTED_LANGUAGES.items()],
+                                value="en",
+                                label="🌍 Speaker 4 Language",
+                                visible=False
+                            )
+                            speaker_lang_5 = gr.Dropdown(
+                                choices=[(f"{lang_name} ({code})", code) for code, lang_name in SUPPORTED_LANGUAGES.items()],
+                                value="en",
+                                label="🌍 Speaker 5 Language",
                                 visible=False
                             )
                     
@@ -2347,9 +2431,10 @@ Alice: I went to Japan. It was absolutely incredible!""",
                     gr.Markdown("**Note**: Files are automatically named with timestamp for easy organization.")
 
             # Tips and info
-            gr.Markdown(
-                """
-                ### 💡 Pro Tips
+            with gr.Accordion("💡 Tips & Best Practices", open=False):
+                gr.Markdown(
+                    """
+                💡 Pro Tips
                 - **On-demand loading**: Models load only when you generate speech (no startup downloads)
                 - **Long text**: Automatically chunked for best quality
                 - **Voice presets**: Save your favorite combinations
@@ -2380,11 +2465,12 @@ Alice: I went to Japan. It was absolutely incredible!""",
                 - **CFG weight**: Lower (0.3) if reference has different language accent
                 - **Supported languages**: 23 languages from Arabic to Chinese
                 - **Quality**: Multilingual model maintains high quality across all languages
-                - **Mixed conversations**: Use different languages per speaker in conversation mode
+                - **Mixed conversations**: Each speaker in conversation mode can use a different language
                 
                 ### 🎭 Voice Conversation Mode Guide
                 - **Script Format**: Use `SpeakerName: Dialogue text` format
                 - **Individual Audio**: Upload different reference audio for each speaker
+                - **Per-Speaker Languages**: Each speaker can use a different language (23 languages supported)
                 - **Auto-Detection**: Speakers are automatically detected and audio upload slots appear
                 - **Timing Control**: Adjust pauses between speakers and within speaker turns
                 - **Voice Variety**: Each speaker can have completely different voice characteristics
@@ -2418,7 +2504,7 @@ Alice: I went to Japan. It was absolutely incredible!""",
                 Hero: We'll see about that!
                 ```
                 """
-            )
+                )
 
     # Hidden components for waveform analysis
     waveform_data = gr.State(None)
@@ -2509,6 +2595,7 @@ Alice: I went to Japan. It was absolutely incredible!""",
         inputs=[conversation_script],
         outputs=[
             speaker_audio_1, speaker_audio_2, speaker_audio_3, speaker_audio_4, speaker_audio_5,
+            speaker_lang_1, speaker_lang_2, speaker_lang_3, speaker_lang_4, speaker_lang_5,
             speaker_controls_row, current_speakers, speaker_settings_json
         ]
     )
@@ -2521,6 +2608,11 @@ Alice: I went to Japan. It was absolutely incredible!""",
             gr.update(visible=False, value=None),  # speaker_audio_3
             gr.update(visible=False, value=None),  # speaker_audio_4
             gr.update(visible=False, value=None),  # speaker_audio_5
+            gr.update(visible=False, value="en"),  # speaker_lang_1
+            gr.update(visible=False, value="en"),  # speaker_lang_2
+            gr.update(visible=False, value="en"),  # speaker_lang_3
+            gr.update(visible=False, value="en"),  # speaker_lang_4
+            gr.update(visible=False, value="en"),  # speaker_lang_5
             gr.update(visible=False),  # speaker_controls_row
             [],  # current_speakers
             "{}"  # speaker_settings_json
@@ -2528,6 +2620,7 @@ Alice: I went to Japan. It was absolutely incredible!""",
         outputs=[
             conversation_script,
             speaker_audio_1, speaker_audio_2, speaker_audio_3, speaker_audio_4, speaker_audio_5,
+            speaker_lang_1, speaker_lang_2, speaker_lang_3, speaker_lang_4, speaker_lang_5,
             speaker_controls_row, current_speakers, speaker_settings_json
         ]
     )
@@ -2538,6 +2631,7 @@ Alice: I went to Japan. It was absolutely incredible!""",
         inputs=[conversation_script],
         outputs=[
             speaker_audio_1, speaker_audio_2, speaker_audio_3, speaker_audio_4, speaker_audio_5,
+            speaker_lang_1, speaker_lang_2, speaker_lang_3, speaker_lang_4, speaker_lang_5,
             speaker_controls_row, current_speakers, speaker_settings_json
         ]
     )
@@ -2549,6 +2643,18 @@ Alice: I went to Japan. It was absolutely incredible!""",
             inputs=[
                 current_speakers,
                 speaker_audio_1, speaker_audio_2, speaker_audio_3, speaker_audio_4, speaker_audio_5,
+                speaker_settings_json
+            ],
+            outputs=[speaker_settings_json]
+        )
+    
+    # Update speaker settings when languages are changed
+    for lang_component in [speaker_lang_1, speaker_lang_2, speaker_lang_3, speaker_lang_4, speaker_lang_5]:
+        lang_component.change(
+            fn=update_speaker_language_settings,
+            inputs=[
+                current_speakers,
+                speaker_lang_1, speaker_lang_2, speaker_lang_3, speaker_lang_4, speaker_lang_5,
                 speaker_settings_json
             ],
             outputs=[speaker_settings_json]
