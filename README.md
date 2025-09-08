@@ -39,7 +39,7 @@ venv\Scripts\activate
 pip install --upgrade pip
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
-uv pip install chatterbox-tts --no-deps --force-reinstall
+pip install chatterbox-tts --no-deps --force-reinstall
 ````
 
 ---
@@ -98,4 +98,5 @@ This project is provided under the original license of the upstream [chatterbox]
 
 Let me know if you’d like a more developer-focused or user-focused version!
 ```
+
 
