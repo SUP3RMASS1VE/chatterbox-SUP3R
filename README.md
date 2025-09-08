@@ -3,10 +3,10 @@
 
 ![Screenshot 2025-06-04 132418](https://github.com/user-attachments/assets/7f423119-4901-406d-a48b-32c3d0bd891f)
 
-````markdown
-# 🎭 Chatterbox TTS Pro (SUP3R Edition)
+---
+# 🎭 Chatterbox TTS Pro (SUP3R Edition) Multilingual
 
-**Chatterbox TTS Pro** is a high-quality, customizable text-to-speech (TTS) system enhanced with voice presets, advanced audio effects, and conversation mode. This is a fork of [Resemble AI's Chatterbox](https://github.com/resemble-ai/chatterbox), extended with additional audio controls, export options, and a powerful UI via Gradio.
+**Chatterbox TTS Pro** is a high-quality, customizable text-to-speech (TTS) system enhanced with voice presets, advanced audio effects, and conversation mode, With 23 Languages. This is a fork of [Resemble AI's Chatterbox](https://github.com/resemble-ai/chatterbox), extended with additional audio controls, export options, and a powerful UI via Gradio.
 
 ---
 
@@ -36,8 +36,10 @@ git clone https://github.com/SUP3RMASS1VE/chatterbox-SUP3R.git
 cd chatterbox-SUP3R
 python -m venv venv
 venv\Scripts\activate
+pip install --upgrade pip
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
+uv pip install chatterbox-tts --no-deps --force-reinstall
 ````
 
 ---
@@ -96,3 +98,4 @@ This project is provided under the original license of the upstream [chatterbox]
 
 Let me know if you’d like a more developer-focused or user-focused version!
 ```
+
