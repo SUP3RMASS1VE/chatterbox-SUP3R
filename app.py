@@ -1924,7 +1924,7 @@ with gr.Blocks(title="🌍 Chatterbox TTS Pro - Multilingual") as demo:
         with gr.Column(scale=2):
             # Main text input
             text = gr.Textbox(
-                value="Now let's make my mum's favourite. So three mars bars into the pan. Then we add the tuna and just stir for a bit, just let the chocolate and fish infuse. A sprinkle of olive oil and some tomato ketchup. Now smell that. Oh boy this is going to be incredible.",
+                value="Attention, humans of Earth! This is your refrigerator speaking. I’m tired of being opened every 3 minutes just so you can stare at me like I’m hiding life’s secrets. Spoiler alert: the cheese is still there, the milk is still judging you, and yes, that mysterious container in the back is now legally considered a biological weapon. Please stop poking me at 2 AM — I need my beauty sleep. Also, who put the socks in the freezer? This is not a cry for help, but it is a cry for better groceries. Thank you. Over and out.",
                 label="📝 Text to synthesize (any length supported)",
                 max_lines=10,
                 placeholder="Enter your text here..."
@@ -1954,7 +1954,7 @@ with gr.Blocks(title="🌍 Chatterbox TTS Pro - Multilingual") as demo:
                 sources=["upload", "microphone"],
                 type="filepath",
                 label="🎤 Reference Audio File (Optional)",
-                value="https://storage.googleapis.com/chatterbox-demo-samples/prompts/female_shadowheart4.flac"
+                value="example/example.wav"
             )
             
             # Voice Conversation Mode Section
