@@ -1,6 +1,36 @@
 import random
 import numpy as np
 import torch
+import os
+
+# Set environment variable to suppress LlamaModel attention warning
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
+# Also set transformers logging level
+import logging
+logging.getLogger("transformers").setLevel(logging.ERROR)
+
+# Monkey patch to set attention implementation for LlamaModel
+def patch_llama_model():
+    try:
+        from transformers import LlamaModel
+        original_init = LlamaModel.__init__
+        
+        def patched_init(self, config, *args, **kwargs):
+            # Set attn_implementation to eager to avoid the warning
+            if hasattr(config, 'attn_implementation'):
+                config.attn_implementation = "eager"
+            elif hasattr(config, '_attn_implementation'):
+                config._attn_implementation = "eager"
+            return original_init(self, config, *args, **kwargs)
+        
+        LlamaModel.__init__ = patched_init
+        print("🔧 Applied LlamaModel attention patch")
+    except Exception as e:
+        print(f"⚠️ Could not patch LlamaModel: {e}")
+
+# Apply the patch before importing chatterbox
+patch_llama_model()
 
 # Try to import multilingual TTS only
 try:
@@ -43,9 +73,42 @@ warnings.filterwarnings("ignore", message=".*torch.backends.cuda.sdp_kernel.*dep
 
 # Suppress LlamaModel attention implementation warning
 warnings.filterwarnings("ignore", message=".*LlamaModel is using LlamaSdpaAttention.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*scaled_dot_product_attention.*does not support.*output_attentions.*", category=UserWarning)
 
 # Suppress past_key_values tuple deprecation warning
 warnings.filterwarnings("ignore", message=".*past_key_values.*tuple of tuples.*deprecated.*", category=UserWarning)
+
+# Suppress alignment stream analyzer warnings
+warnings.filterwarnings("ignore", message=".*forcing EOS token.*", category=UserWarning)
+logging.getLogger("chatterbox.models.t3.inference.alignment_stream_analyzer").setLevel(logging.ERROR)
+
+# Suppress all chatterbox logging warnings
+logging.getLogger("chatterbox").setLevel(logging.ERROR)
+
+# Suppress root logger warnings from chatterbox
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.ERROR)
+
+# Create a custom filter to suppress specific log messages
+class ChatterboxLogFilter(logging.Filter):
+    def filter(self, record):
+        # Suppress specific chatterbox warnings
+        suppressed_messages = [
+            "Reference mel length is not equal to 2 * reference token length",
+            "forcing EOS token",
+            "Detected repetition of token",
+            "Reference mel length is not equal"
+        ]
+        
+        for msg in suppressed_messages:
+            if msg in record.getMessage():
+                return False
+        return True
+
+# Apply the filter to root logger
+root_logger.addFilter(ChatterboxLogFilter())
+
+warnings.filterwarnings("ignore", message=".*Reference mel length is not equal to 2.*reference token length.*", category=UserWarning)
 
 # Suppress additional transformers warnings
 warnings.filterwarnings("ignore", message=".*LlamaModel.*LlamaSdpaAttention.*", category=UserWarning)
@@ -57,6 +120,9 @@ warnings.filterwarnings("ignore", message=".*Trying to convert audio automatical
 # More aggressive warning suppression for transformers
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers.*")
 warnings.filterwarnings("ignore", category=FutureWarning, module="transformers.*")
+
+# Suppress the specific attention implementation warning
+warnings.filterwarnings("ignore", message=".*Falling back to the manual attention implementation.*", category=UserWarning)
 
 # Suppress all warnings containing these key phrases
 warnings.filterwarnings("ignore", message=".*scaled_dot_product_attention.*")
@@ -79,6 +145,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module=".*perth.*")
 # Suppress chatterbox TTS model warnings
 warnings.filterwarnings("ignore", message=".*Detected.*repetition of token.*", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*forcing EOS token.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*Reference mel length is not equal.*")
 warnings.filterwarnings("ignore", category=UserWarning, module=".*chatterbox.*")
 warnings.filterwarnings("ignore", category=UserWarning, module=".*alignment_stream_analyzer.*")
 
@@ -119,9 +186,9 @@ SUPPORTED_LANGUAGES = {
 MULTILINGUAL_MODEL_FILES = {
     'Cangjie5_TC': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/Cangjie5_TC.json',
     'conds': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/conds.pt',
-    'mtl_tokenizer': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/mtl_tokenizer.json',
+    'grapheme_mtl_merged_expanded_v1': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/grapheme_mtl_merged_expanded_v1.json',
     's3gen': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.pt',
-    't3_23lang': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/t3_23lang.safetensors',
+    't3_mtl23ls_v2': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/t3_mtl23ls_v2.safetensors',
     've': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/ve.pt'
 }
 
@@ -267,6 +334,28 @@ def check_model_files_status():
         status_text += f"❌ Missing: {', '.join(missing_files)}\n"
         status_text += "Click 'Download Models' to get the missing files."
         return status_text
+
+def clear_model_cache():
+    """Clear the cached multilingual model to force reload with new configuration."""
+    global MULTILINGUAL_MODEL
+    
+    try:
+        if MULTILINGUAL_MODEL is not None:
+            print("🧹 Clearing cached multilingual model...")
+            MULTILINGUAL_MODEL = None
+            # Force garbage collection to free GPU memory
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return "✅ Model cache cleared successfully!"
+        else:
+            return "ℹ️ No model was cached."
+            
+    except Exception as e:
+        error_msg = f"❌ Error clearing model cache: {str(e)}"
+        print(error_msg)
+        return error_msg
 
 def load_model_manually():
     """Manually load the multilingual model into memory."""
@@ -1912,9 +2001,9 @@ with gr.Blocks(title="🌍 Chatterbox TTS Pro - Multilingual") as demo:
                 **Model Files:**
                 - `Cangjie5_TC` - Chinese tokenizer
                 - `conds` - Conditional embeddings
-                - `mtl_tokenizer` - Multilingual tokenizer
+                - `grapheme_mtl_merged_expanded_v1` - Multilingual tokenizer
                 - `s3gen` - Speech generator
-                - `t3_23lang` - Text-to-speech model
+                - `t3_mtl23ls_v2` - Text-to-speech model
                 - `ve` - Voice encoder
                 
                 **Total size:** ~2-4 GB
