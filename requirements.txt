@@ -1,5 +1,5 @@
 gradio==5.44.1
-numpy==1.24.0
+numpy
 resampy==0.4.3
 librosa==0.11.0
 s3tokenizer
@@ -11,3 +11,8 @@ resemble-perth==1.0.1
 silero-vad==5.1.2
 conformer==0.3.2
 pykakasi==2.3.0
+openai-whisper
+accelerate
+moviepy
+pydub
+deep-translator
