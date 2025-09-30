@@ -32,6 +32,61 @@ def patch_llama_model():
 # Apply the patch before importing chatterbox
 patch_llama_model()
 
+# Monkey patch to fix Cangjie5_TC.json duplicate download issue
+def patch_cangjie_loader():
+    """Patch ChineseCangjieConverter to check local files before downloading from HF Hub."""
+    try:
+        from chatterbox.models.tokenizers.tokenizer import ChineseCangjieConverter
+        from pathlib import Path
+        import json
+        from huggingface_hub import hf_hub_download
+        import logging
+        
+        original_load = ChineseCangjieConverter._load_cangjie_mapping
+        
+        def patched_load(self, model_dir=None):
+            """Load Cangjie mapping, checking local directory first."""
+            logger = logging.getLogger(__name__)
+            try:
+                # First, check if the file exists locally in model_dir
+                cangjie_file = None
+                if model_dir:
+                    local_path = Path(model_dir) / "Cangjie5_TC.json"
+                    if local_path.exists():
+                        cangjie_file = str(local_path)
+                        print(f"📁 Using local Cangjie5_TC.json from {cangjie_file}")
+                
+                # If not found locally, download from HuggingFace Hub
+                if cangjie_file is None:
+                    print("🌐 Downloading Cangjie5_TC.json from HuggingFace Hub")
+                    cangjie_file = hf_hub_download(
+                        repo_id="ResembleAI/chatterbox",
+                        filename="Cangjie5_TC.json",
+                        cache_dir=model_dir
+                    )
+                
+                with open(cangjie_file, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+                
+                for entry in data:
+                    word, code = entry.split("\t")[:2]
+                    self.word2cj[word] = code
+                    if code not in self.cj2word:
+                        self.cj2word[code] = [word]
+                    else:
+                        self.cj2word[code].append(word)
+                        
+            except Exception as e:
+                logger.warning(f"Could not load Cangjie mapping: {e}")
+        
+        ChineseCangjieConverter._load_cangjie_mapping = patched_load
+        print("🔧 Applied Cangjie loader patch to avoid duplicate downloads")
+    except Exception as e:
+        print(f"⚠️ Could not patch Cangjie loader: {e}")
+
+# Apply the Cangjie patch before importing chatterbox
+patch_cangjie_loader()
+
 # Try to import multilingual TTS only
 try:
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
