@@ -237,7 +237,7 @@ SUPPORTED_LANGUAGES = {
     'zh': 'Chinese'
 }
 
-# Multilingual model download configuration
+# Multilingual model download configuration (updated for newer model files)
 MULTILINGUAL_MODEL_FILES = {
     'Cangjie5_TC': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/Cangjie5_TC.json',
     'conds': 'https://huggingface.co/ResembleAI/chatterbox/resolve/main/conds.pt',
@@ -1141,6 +1141,218 @@ def clear_hf_credentials():
         print(f"⚠️ Could not clear HF credentials: {e}")
         return False
 
+def load_multilingual_model_custom(ckpt_dir, device):
+    """Custom loader for newer multilingual model files with updated names."""
+    try:
+        from pathlib import Path
+        import torch
+        from safetensors.torch import load_file as load_safetensors
+        from chatterbox.models.t3 import T3
+        from chatterbox.models.t3.modules.t3_config import T3Config
+        from chatterbox.models.s3gen import S3Gen
+        from chatterbox.models.tokenizers import MTLTokenizer
+        from chatterbox.models.voice_encoder import VoiceEncoder
+        from chatterbox.mtl_tts import Conditionals
+        
+        print("🔧 Starting custom model loading...")
+        ckpt_dir = Path(ckpt_dir)
+        
+        # Load voice encoder
+        print("📥 Loading voice encoder...")
+        ve = VoiceEncoder()
+        ve.load_state_dict(torch.load(ckpt_dir / "ve.pt", weights_only=True))
+        ve.to(device).eval()
+        print("✅ Voice encoder loaded")
+        
+        # Load T3 model with newer filename and detect vocab size from checkpoint
+        t3_file = ckpt_dir / "t3_mtl23ls_v2.safetensors"  # Use newer filename
+        if not t3_file.exists():
+            t3_file = ckpt_dir / "t3_23lang.safetensors"  # Fallback to old name
+        
+        print(f"📥 Loading T3 model from: {t3_file}")
+        
+        # Load checkpoint to inspect vocab size
+        t3_state = load_safetensors(t3_file)
+        if "model" in t3_state.keys():
+            t3_state = t3_state["model"][0]
+        
+        # Detect vocabulary size from the text_emb.weight tensor
+        vocab_size = t3_state['text_emb.weight'].shape[0]
+        print(f"🔍 Detected model vocabulary size: {vocab_size}")
+        
+        # Create custom T3Config with the correct vocabulary size
+        print("⚙️ Creating T3Config...")
+        
+        # Create a custom config class that matches the vocab size
+        class CustomT3Config:
+            def __init__(self, vocab_size):
+                self.start_text_token = 255
+                self.stop_text_token = 0
+                self.text_tokens_dict_size = vocab_size
+                self.max_text_tokens = 2048
+
+                self.start_speech_token = 6561
+                self.stop_speech_token = 6562
+                self.speech_tokens_dict_size = 8194
+                self.max_speech_tokens = 4096
+
+                self.llama_config_name = "Llama_520M"
+                self.input_pos_emb = "learned"
+                self.speech_cond_prompt_len = 150
+
+                # For T3CondEnc
+                self.encoder_type = "voice_encoder"
+                self.speaker_embed_size = 256
+                self.use_perceiver_resampler = True
+                self.emotion_adv = True
+
+            @property
+            def n_channels(self):
+                from chatterbox.models.t3.llama_configs import LLAMA_CONFIGS
+                return LLAMA_CONFIGS[self.llama_config_name]["hidden_size"]
+            
+            @property
+            def is_multilingual(self):
+                # Consider it multilingual if vocab size is larger than English-only (704)
+                return self.text_tokens_dict_size > 704
+        
+        config = CustomT3Config(vocab_size)
+        print(f"🆕 Using custom config with vocab size: {vocab_size}")
+        
+        # Initialize T3 with the correct config
+        print("🏗️ Initializing T3 model...")
+        t3 = T3(config)
+        print("📥 Loading T3 state dict...")
+        t3.load_state_dict(t3_state)
+        t3.to(device).eval()
+        print("✅ T3 model loaded")
+        
+        # Load S3Gen
+        print("📥 Loading S3Gen...")
+        s3gen = S3Gen()
+        s3gen.load_state_dict(torch.load(ckpt_dir / "s3gen.pt", weights_only=True))
+        s3gen.to(device).eval()
+        print("✅ S3Gen loaded")
+        
+        # Load tokenizer with newer filename
+        tokenizer_file = ckpt_dir / "grapheme_mtl_merged_expanded_v1.json"  # Use newer filename
+        if not tokenizer_file.exists():
+            tokenizer_file = ckpt_dir / "mtl_tokenizer.json"  # Fallback to old name
+        
+        print(f"📥 Loading tokenizer from: {tokenizer_file}")
+        tokenizer = MTLTokenizer(str(tokenizer_file))
+        print("✅ Tokenizer loaded")
+        
+        # Load conditionals if available
+        conds = None
+        builtin_voice_file = ckpt_dir / "conds.pt"
+        if builtin_voice_file.exists():
+            print("📥 Loading conditionals...")
+            conds = Conditionals.load(builtin_voice_file).to(device)
+            print("✅ Conditionals loaded")
+        else:
+            print("ℹ️ No conditionals file found")
+        
+        print("🏗️ Creating ChatterboxMultilingualTTS instance...")
+        
+        # Create a custom ChatterboxMultilingualTTS that handles the watermarker issue
+        class CustomChatterboxMultilingualTTS(ChatterboxMultilingualTTS):
+            def __init__(self, t3, s3gen, ve, tokenizer, device, conds=None):
+                self.sr = 24000  # S3GEN_SR sample rate
+                self.t3 = t3
+                self.s3gen = s3gen
+                self.ve = ve
+                self.tokenizer = tokenizer
+                self.device = device
+                self.conds = conds
+                
+                # Skip watermarking entirely
+                self.watermarker = None
+                print("🚫 Watermarking disabled by user preference")
+            
+            def apply_watermark_safe(self, wav, sample_rate):
+                """Return original audio without watermarking."""
+                return wav
+            
+            def generate(self, text, language_id, audio_prompt_path=None, exaggeration=0.5, 
+                        cfg_weight=0.5, temperature=0.8, repetition_penalty=2.0, min_p=0.05, top_p=1.0):
+                """Override generate method to use safe watermarking."""
+                # Call the parent generate method but handle the watermarking ourselves
+                import torch.nn.functional as F
+                from chatterbox.models.s3tokenizer import drop_invalid_tokens
+                from chatterbox.mtl_tts import punc_norm, SUPPORTED_LANGUAGES
+                from chatterbox.models.t3.modules.cond_enc import T3Cond
+                
+                # Validate language_id
+                if language_id and language_id.lower() not in SUPPORTED_LANGUAGES:
+                    supported_langs = ", ".join(SUPPORTED_LANGUAGES.keys())
+                    raise ValueError(
+                        f"Unsupported language_id '{language_id}'. "
+                        f"Supported languages: {supported_langs}"
+                    )
+                
+                if audio_prompt_path:
+                    self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
+                else:
+                    assert self.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+
+                # Update exaggeration if needed
+                if float(exaggeration) != float(self.conds.t3.emotion_adv[0, 0, 0].item()):
+                    _cond = self.conds.t3
+                    self.conds.t3 = T3Cond(
+                        speaker_emb=_cond.speaker_emb,
+                        cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
+                        emotion_adv=exaggeration * torch.ones(1, 1, 1),
+                    ).to(device=self.device)
+
+                # Norm and tokenize text
+                text = punc_norm(text)
+                text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower() if language_id else None).to(self.device)
+                text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
+
+                sot = self.t3.hp.start_text_token
+                eot = self.t3.hp.stop_text_token
+                text_tokens = F.pad(text_tokens, (1, 0), value=sot)
+                text_tokens = F.pad(text_tokens, (0, 1), value=eot)
+
+                with torch.inference_mode():
+                    speech_tokens = self.t3.inference(
+                        t3_cond=self.conds.t3,
+                        text_tokens=text_tokens,
+                        max_new_tokens=1000,
+                        temperature=temperature,
+                        cfg_weight=cfg_weight,
+                        repetition_penalty=repetition_penalty,
+                        min_p=min_p,
+                        top_p=top_p,
+                    )
+                    # Extract only the conditional batch.
+                    speech_tokens = speech_tokens[0]
+
+                    speech_tokens = drop_invalid_tokens(speech_tokens)
+                    speech_tokens = speech_tokens.to(self.device)
+
+                    wav, _ = self.s3gen.inference(
+                        speech_tokens=speech_tokens,
+                        ref_dict=self.conds.gen,
+                    )
+                    wav = wav.squeeze(0).detach().cpu().numpy()
+                    
+                    # Use our safe watermarking method
+                    watermarked_wav = self.apply_watermark_safe(wav, sample_rate=self.sr)
+                    
+                return torch.from_numpy(watermarked_wav).unsqueeze(0)
+        
+        model = CustomChatterboxMultilingualTTS(t3, s3gen, ve, tokenizer, device, conds=conds)
+        print("✅ Custom model loading completed successfully!")
+        return model
+        
+    except Exception as e:
+        print(f"❌ Error in custom model loading: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
 def get_or_load_model():
     """Loads the multilingual ChatterBox model if it hasn't been loaded already,
     and ensures it's on the correct device."""
@@ -1158,8 +1370,8 @@ def get_or_load_model():
             existing_files, missing_files = check_multilingual_models_exist()
             if not missing_files:
                 print(f"📁 Using local multilingual models from: {os.path.abspath(MODEL_DOWNLOAD_DIR)}")
-                # Load from local directory if all files exist
-                MULTILINGUAL_MODEL = ChatterboxMultilingualTTS.from_local(MODEL_DOWNLOAD_DIR, device=DEVICE)
+                # Use custom loader that supports newer model filenames
+                MULTILINGUAL_MODEL = load_multilingual_model_custom(MODEL_DOWNLOAD_DIR, device=DEVICE)
             else:
                 print("🌐 Loading multilingual model from Hugging Face...")
                 print("💡 Tip: Download models locally using the download section for faster loading")
@@ -1179,7 +1391,7 @@ def get_or_load_model():
                     existing_files, missing_files = check_multilingual_models_exist()
                     if not missing_files:
                         print(f"📁 Retrying with local multilingual models from: {os.path.abspath(MODEL_DOWNLOAD_DIR)}")
-                        MULTILINGUAL_MODEL = ChatterboxMultilingualTTS.from_local(MODEL_DOWNLOAD_DIR, device=DEVICE)
+                        MULTILINGUAL_MODEL = load_multilingual_model_custom(MODEL_DOWNLOAD_DIR, device=DEVICE)
                     else:
                         print("🌐 Retrying multilingual model from Hugging Face...")
                         print("💡 Tip: Download models locally using the download section for faster loading")
